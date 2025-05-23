@@ -83,6 +83,10 @@ class FakeDataset(Dataset):
 
 def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseModelConfig) -> Dataset:
     """Create a dataset for training."""
+    if isinstance(data_config, _config.ConcatDataConfig):
+        datasets = [create_dataset(dc, model_config) for dc in data_config.datasets]
+        return torch.utils.data.ConcatDataset(datasets)
+
     repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
@@ -107,6 +111,8 @@ def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseMod
 
 def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip_norm_stats: bool = False) -> Dataset:
     """Transform the dataset by applying the data transforms."""
+    if isinstance(data_config, _config.ConcatDataConfig):
+        raise ValueError("transform_dataset expects a single DataConfig, not ConcatDataConfig")
     norm_stats = {}
     if data_config.repo_id != "fake" and not skip_norm_stats:
         if data_config.norm_stats is None:
@@ -152,8 +158,16 @@ def create_data_loader(
     """
     data_config = config.data.create(config.assets_dirs, config.model)
 
-    dataset = create_dataset(data_config, config.model)
-    dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+    if isinstance(data_config, _config.ConcatDataConfig):
+        datasets = []
+        for dc in data_config.datasets:
+            ds = create_dataset(dc, config.model)
+            ds = transform_dataset(ds, dc, skip_norm_stats=skip_norm_stats)
+            datasets.append(ds)
+        dataset = torch.utils.data.ConcatDataset(datasets)
+    else:
+        dataset = create_dataset(data_config, config.model)
+        dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     data_loader = TorchDataLoader(
         dataset,
