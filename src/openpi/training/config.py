@@ -26,6 +26,8 @@ import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 
+logger = logging.getLogger(__name__)
+
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
@@ -89,6 +91,13 @@ class DataConfig:
 
     # If true, will disable syncing the dataset from the Hugging Face Hub. Allows training on local-only datasets.
     local_files_only: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class ConcatDataConfig(DataConfig):
+    """Data config that concatenates multiple datasets."""
+
+    datasets: Sequence[DataConfig] = dataclasses.field(default_factory=tuple)
 
 
 class GroupFactory(Protocol):
@@ -163,10 +172,10 @@ class DataConfigFactory(abc.ABC):
         try:
             data_assets_dir = str(assets_dir / asset_id)
             norm_stats = _normalize.load(_download.maybe_download(data_assets_dir))
-            logging.info(f"Loaded norm stats from {data_assets_dir}")
+            logger.info("Loaded norm stats from %s", data_assets_dir)
             return norm_stats
         except FileNotFoundError:
-            logging.info(f"Norm stats not found in {data_assets_dir}, skipping.")
+            logger.info("Norm stats not found in %s, skipping.", data_assets_dir)
         return None
 
 
@@ -247,6 +256,43 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
         )
+
+
+@dataclasses.dataclass(frozen=True)
+class ConcatLeRobotAlohaDataConfig(DataConfigFactory):
+    """Concatenate multiple Aloha datasets."""
+
+    repo_id: str = "fake"
+    repo_ids: Sequence[str] = dataclasses.field(default_factory=tuple)
+    use_delta_joint_actions: bool = True
+    default_prompts: Sequence[str | None] | None = None
+    adapt_to_pi: bool = True
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=LeRobotAlohaDataConfig.repack_transforms
+    )
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> ConcatDataConfig:
+        child_configs: list[DataConfig] = []
+        for idx, repo_id in enumerate(self.repo_ids):
+            default_prompt = None
+            if self.default_prompts is not None and idx < len(self.default_prompts):
+                default_prompt = self.default_prompts[idx]
+            child_configs.append(
+                LeRobotAlohaDataConfig(
+                    repo_id=repo_id,
+                    assets=self.assets,
+                    base_config=self.base_config,
+                    use_delta_joint_actions=self.use_delta_joint_actions,
+                    default_prompt=default_prompt,
+                    adapt_to_pi=self.adapt_to_pi,
+                    repack_transforms=self.repack_transforms,
+                    action_sequence_keys=self.action_sequence_keys,
+                ).create(assets_dirs, model_config)
+            )
+
+        return ConcatDataConfig(repo_id="+".join(self.repo_ids), datasets=tuple(child_configs))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -620,6 +666,20 @@ _CONFIGS = [
         data=LeRobotAlohaDataConfig(
             repo_id="lerobot/aloha_sim_transfer_cube_human",
             default_prompt="Transfer cube",
+            use_delta_joint_actions=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=20_000,
+    ),
+    TrainConfig(
+        name="pi0_aloha_combined",
+        model=pi0.Pi0Config(),
+        data=ConcatLeRobotAlohaDataConfig(
+            repo_ids=[
+                "lerobot/aloha_sim_transfer_cube_human",
+                "physical-intelligence/aloha_pen_uncap_diverse",
+            ],
+            default_prompts=["Transfer cube", "uncap the pen"],
             use_delta_joint_actions=False,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
